@@ -1,0 +1,36 @@
+# Go binaries
+syscalld
+*.exe
+*.test
+*.out
+
+# Go build cache
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# BPF generated objects
+*.o
+!bpf/*.o
+
+# Legacy Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
