@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -59,13 +60,15 @@ type SensorManager struct {
 	Bus     *EventBus
 	Filters *SensorFilter
 
-	mu           sync.Mutex
+	mu           sync.RWMutex
 	sensors      []Sensor
 	running      bool
 	pollDone     chan struct{}
 	pollInterval time.Duration
 	merged       chan Event
 	mergedDone   chan struct{}
+	stopCh       chan struct{} // closed on Stop to signal goroutines
+	droppedCount uint64       // atomic — events dropped due to full merged channel
 }
 
 // NewSensorManager creates a new SensorManager with optional filter configuration.
@@ -83,10 +86,27 @@ func NewSensorManager(filters *SensorFilter) *SensorManager {
 
 // Events returns a merged read-only channel that delivers every event emitted
 // by all registered sensors. The channel is fed by the polling loop (fallback
-// sensors) and directly by eBPF sensor channels (when available). It remains
-// open until Stop() returns.
+// sensors) and directly by eBPF sensor channels (when available). It is closed
+// when Stop() completes. Callers must re-call Events() after a Stop/Start
+// cycle to get the new channel.
 func (m *SensorManager) Events() <-chan Event {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.merged
+}
+
+// DroppedEvents returns the number of events that were dropped because the
+// merged channel buffer was full. This is an atomic counter that can be
+// called from any goroutine.
+func (m *SensorManager) DroppedEvents() uint64 {
+	return atomic.LoadUint64(&m.droppedCount)
+}
+
+// SetPollInterval configures the polling interval. Must be called before Start().
+func (m *SensorManager) SetPollInterval(d time.Duration) {
+	if d > 0 {
+		m.pollInterval = d
+	}
 }
 
 // Add registers a sensor to be managed.
@@ -109,19 +129,27 @@ func (m *SensorManager) OnAny(callback EventHandler) {
 // Start starts all sensors and begins the polling goroutine.
 func (m *SensorManager) Start() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.running {
+		m.mu.Unlock()
 		return
 	}
 	m.running = true
+	m.merged = make(chan Event, 4096)
+	m.stopCh = make(chan struct{})
+	atomic.StoreUint64(&m.droppedCount, 0)
+	sensors := make([]Sensor, len(m.sensors))
+	copy(sensors, m.sensors)
+	m.mu.Unlock()
 
-	for _, sensor := range m.sensors {
+	for _, sensor := range sensors {
 		sensor.Start(m.Filters)
 	}
 
+	m.mu.Lock()
 	m.pollDone = make(chan struct{})
 	m.mergedDone = make(chan struct{})
+	m.mu.Unlock()
+
 	go m.pollLoop()
 	go m.fanIn()
 }
@@ -131,32 +159,63 @@ func (m *SensorManager) Stop() {
 	m.mu.Lock()
 	wasRunning := m.running
 	m.running = false
+	pollDone := m.pollDone
+	mergedDone := m.mergedDone
+	stopCh := m.stopCh
 	m.mu.Unlock()
 
-	if wasRunning && m.pollDone != nil {
-		<-m.pollDone
-	}
-	if wasRunning && m.mergedDone != nil {
-		<-m.mergedDone
+	// Signal goroutines to exit.
+	if wasRunning && stopCh != nil {
+		close(stopCh)
 	}
 
-	m.mu.Lock()
-	for _, sensor := range m.sensors {
+	if wasRunning && pollDone != nil {
+		<-pollDone
+	}
+	if wasRunning && mergedDone != nil {
+		<-mergedDone
+	}
+
+	// Close the merged channel so consumers of Events() see an EOF.
+	if wasRunning {
+		close(m.merged)
+	}
+
+	m.mu.RLock()
+	sensors := make([]Sensor, len(m.sensors))
+	copy(sensors, m.sensors)
+	m.mu.RUnlock()
+
+	for _, sensor := range sensors {
 		sensor.Stop()
 	}
-	m.mu.Unlock()
+}
+
+// emitToMerged sends an event to the merged channel, incrementing the drop
+// counter if the buffer is full.
+func (m *SensorManager) emitToMerged(evt Event) {
+	select {
+	case m.merged <- evt:
+	default:
+		dropped := atomic.AddUint64(&m.droppedCount, 1)
+		// Log every 1000th drop to avoid flooding stderr.
+		if dropped == 1 || dropped%1000 == 0 {
+			fmt.Fprintf(os.Stderr, "[SensorManager] Event buffer full — %d events dropped total\n", dropped)
+		}
+	}
 }
 
 // fanIn reads from every ChanSensor's channel and forwards events to the
-// merged channel and the EventBus. It exits when the manager stops running.
+// merged channel and the EventBus. It exits when stopCh is closed.
 // Sensors that do not implement ChanSensor are served by the poll loop.
 func (m *SensorManager) fanIn() {
 	defer close(m.mergedDone)
 
-	m.mu.Lock()
+	m.mu.RLock()
 	sensors := make([]Sensor, len(m.sensors))
 	copy(sensors, m.sensors)
-	m.mu.Unlock()
+	stopCh := m.stopCh
+	m.mu.RUnlock()
 
 	var chans []<-chan Event
 	for _, s := range sensors {
@@ -170,16 +229,22 @@ func (m *SensorManager) fanIn() {
 		}
 	}
 
+	// If no ChanSensors, just wait for stop signal and exit.
+	if len(chans) == 0 {
+		<-stopCh
+		return
+	}
+
 	for {
-		m.mu.Lock()
-		running := m.running
-		m.mu.Unlock()
-		if !running {
+		select {
+		case <-stopCh:
 			return
+		default:
 		}
 		for _, ch := range chans {
 			m.drainChan(ch)
 		}
+		// Brief sleep to yield CPU between drain cycles.
 		time.Sleep(m.pollInterval)
 	}
 }
@@ -191,10 +256,7 @@ func (m *SensorManager) drainChan(ch <-chan Event) {
 			if !ok {
 				return
 			}
-			select {
-			case m.merged <- evt:
-			default:
-			}
+			m.emitToMerged(evt)
 			m.Bus.Emit(evt)
 		default:
 			return
@@ -205,18 +267,24 @@ func (m *SensorManager) drainChan(ch <-chan Event) {
 func (m *SensorManager) pollLoop() {
 	defer close(m.pollDone)
 
+	m.mu.RLock()
+	stopCh := m.stopCh
+	m.mu.RUnlock()
+
 	lastCanary := time.Now()
 	const canaryInterval = 30 * time.Second
 
 	for {
-		m.mu.Lock()
-		if !m.running {
-			m.mu.Unlock()
+		select {
+		case <-stopCh:
 			return
+		default:
 		}
+
+		m.mu.RLock()
 		sensors := make([]Sensor, len(m.sensors))
 		copy(sensors, m.sensors)
-		m.mu.Unlock()
+		m.mu.RUnlock()
 
 		for _, sensor := range sensors {
 			func() {
@@ -229,10 +297,7 @@ func (m *SensorManager) pollLoop() {
 				events := sensor.Poll()
 				for _, event := range events {
 					m.Bus.Emit(event)
-					select {
-					case m.merged <- event:
-					default:
-					}
+					m.emitToMerged(event)
 				}
 			}()
 		}
@@ -242,10 +307,7 @@ func (m *SensorManager) pollLoop() {
 		if time.Since(lastCanary) >= canaryInterval {
 			canary := NewCanaryEvent()
 			m.Bus.Emit(canary)
-			select {
-			case m.merged <- canary:
-			default:
-			}
+			m.emitToMerged(canary)
 			lastCanary = time.Now()
 		}
 
@@ -255,22 +317,22 @@ func (m *SensorManager) pollLoop() {
 
 // SensorCount returns the number of registered sensors.
 func (m *SensorManager) SensorCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return len(m.sensors)
 }
 
 // Running returns whether the manager is actively polling.
 func (m *SensorManager) Running() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.running
 }
 
 // SensorNames returns the names of all registered sensors.
 func (m *SensorManager) SensorNames() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	names := make([]string, len(m.sensors))
 	for i, s := range m.sensors {
 		names[i] = s.Name()
@@ -280,10 +342,10 @@ func (m *SensorManager) SensorNames() []string {
 
 // Healths returns a health snapshot for every registered sensor.
 func (m *SensorManager) Healths() []SensorHealth {
-	m.mu.Lock()
+	m.mu.RLock()
 	sensors := make([]Sensor, len(m.sensors))
 	copy(sensors, m.sensors)
-	m.mu.Unlock()
+	m.mu.RUnlock()
 
 	out := make([]SensorHealth, len(sensors))
 	for i, s := range sensors {

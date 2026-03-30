@@ -49,7 +49,13 @@ func buildInodePIDMap() map[string]int {
 			continue
 		}
 
-		for _, entry := range entries {
+		// Cap per-process FD scan to prevent DoS from processes with huge fd tables.
+		fdLimit := 256
+		if len(entries) < fdLimit {
+			fdLimit = len(entries)
+		}
+
+		for _, entry := range entries[:fdLimit] {
 			link, err := os.Readlink(filepath.Join(fdDir, entry.Name()))
 			if err != nil {
 				continue

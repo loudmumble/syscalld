@@ -1,5 +1,5 @@
 # Go binaries
-syscalld
+/syscalld
 *.exe
 *.test
 *.out

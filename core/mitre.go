@@ -17,10 +17,10 @@ var HookMITREMap = map[string]MITRETag{
 		Tactic:         "Execution",
 	},
 	"sched_process_exit": {
-		TechniqueID:    "T1059",
-		SubTechniqueID: "T1059.004",
-		Name:           "Unix Shell",
-		Tactic:         "Execution",
+		TechniqueID:    "T1057",
+		SubTechniqueID: "",
+		Name:           "Process Discovery",
+		Tactic:         "Discovery",
 	},
 	"tcp_v4_connect": {
 		TechniqueID:    "T1071",

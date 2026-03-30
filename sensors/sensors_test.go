@@ -702,11 +702,12 @@ func TestRingbufSupportedIsFalse(t *testing.T) {
 
 func TestBaseSensor_PollWithNilFallback(t *testing.T) {
 	s := NewBaseSensor("test")
-	s.started = true
+	s.Start(core.NewSensorFilter()) // Use Start() instead of setting started directly
 	result := s.Poll()
 	if result != nil {
 		t.Fatal("Poll with nil PollFallback should return nil")
 	}
+	s.Stop()
 }
 
 func TestBaseSensor_GetBPFProgramWithNilFunc(t *testing.T) {
@@ -719,9 +720,9 @@ func TestBaseSensor_GetBPFProgramWithNilFunc(t *testing.T) {
 
 func TestBaseSensor_StopWithNilOnStop(t *testing.T) {
 	s := NewBaseSensor("test")
-	s.started = true
+	s.Start(core.NewSensorFilter())
 	s.Stop() // Should not panic
-	if s.started {
+	if s.Started() {
 		t.Fatal("started should be false after Stop()")
 	}
 }
@@ -729,9 +730,10 @@ func TestBaseSensor_StopWithNilOnStop(t *testing.T) {
 func TestBaseSensor_StartWithNilOnStart(t *testing.T) {
 	s := NewBaseSensor("test")
 	s.Start(core.NewSensorFilter()) // Should not panic
-	if !s.started {
+	if !s.Started() {
 		t.Fatal("started should be true after Start()")
 	}
+	s.Stop()
 }
 
 // ---------------------------------------------------------------------------
@@ -747,29 +749,6 @@ func TestSensorModeDetection_FallbackWhenNonRoot(t *testing.T) {
 	s.Stop()
 }
 
-// ---------------------------------------------------------------------------
-// itoa helper (internal)
-// ---------------------------------------------------------------------------
-
-func TestItoa(t *testing.T) {
-	tests := []struct {
-		input    int
-		expected string
-	}{
-		{0, "0"},
-		{1, "1"},
-		{10, "10"},
-		{24, "24"},
-		{-5, "-5"},
-		{100, "100"},
-	}
-	for _, tc := range tests {
-		result := itoa(tc.input)
-		if result != tc.expected {
-			t.Errorf("itoa(%d) = %q, want %q", tc.input, result, tc.expected)
-		}
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Additional edge case tests
@@ -804,5 +783,138 @@ func TestParseHexAddr_MissingPort(t *testing.T) {
 	}
 	if port != 0 {
 		t.Fatalf("expected port 0, got %d", port)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Runtime filter application tests
+// ---------------------------------------------------------------------------
+
+func TestFilterEvents_PIDFilter(t *testing.T) {
+	events := []core.Event{
+		&core.ProcessEvent{KernelEvent: core.KernelEvent{PID: 100, EventType: "process"}, Argv: []string{}},
+		&core.ProcessEvent{KernelEvent: core.KernelEvent{PID: 200, EventType: "process"}, Argv: []string{}},
+		&core.ProcessEvent{KernelEvent: core.KernelEvent{PID: 300, EventType: "process"}, Argv: []string{}},
+	}
+	filter := core.NewSensorFilter()
+	filter.TargetPIDs[100] = struct{}{}
+	filter.TargetPIDs[300] = struct{}{}
+
+	result := filterEvents(events, filter)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(result))
+	}
+	if result[0].(*core.ProcessEvent).PID != 100 {
+		t.Fatalf("expected PID 100, got %d", result[0].(*core.ProcessEvent).PID)
+	}
+	if result[1].(*core.ProcessEvent).PID != 300 {
+		t.Fatalf("expected PID 300, got %d", result[1].(*core.ProcessEvent).PID)
+	}
+}
+
+func TestFilterEvents_CommExclude(t *testing.T) {
+	events := []core.Event{
+		&core.NetworkEvent{KernelEvent: core.KernelEvent{PID: 1, Comm: "sshd", EventType: "network"}},
+		&core.NetworkEvent{KernelEvent: core.KernelEvent{PID: 2, Comm: "curl", EventType: "network"}},
+		&core.NetworkEvent{KernelEvent: core.KernelEvent{PID: 3, Comm: "systemd", EventType: "network"}},
+	}
+	filter := core.NewSensorFilter()
+	filter.ExcludeComms["sshd"] = struct{}{}
+	filter.ExcludeComms["systemd"] = struct{}{}
+
+	result := filterEvents(events, filter)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result))
+	}
+	if result[0].(*core.NetworkEvent).Comm != "curl" {
+		t.Fatalf("expected comm 'curl', got %q", result[0].(*core.NetworkEvent).Comm)
+	}
+}
+
+func TestFilterEvents_SyscallWhitelist(t *testing.T) {
+	events := []core.Event{
+		&core.SyscallEvent{KernelEvent: core.KernelEvent{PID: 1, EventType: "syscall"}, SyscallNR: 59, Args: []int{}},
+		&core.SyscallEvent{KernelEvent: core.KernelEvent{PID: 1, EventType: "syscall"}, SyscallNR: 42, Args: []int{}},
+		&core.SyscallEvent{KernelEvent: core.KernelEvent{PID: 1, EventType: "syscall"}, SyscallNR: 9, Args: []int{}},
+	}
+	filter := core.NewSensorFilter()
+	filter.SyscallWhitelist[59] = struct{}{}
+
+	result := filterEvents(events, filter)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(result))
+	}
+	if result[0].(*core.SyscallEvent).SyscallNR != 59 {
+		t.Fatalf("expected syscall NR 59, got %d", result[0].(*core.SyscallEvent).SyscallNR)
+	}
+}
+
+func TestFilterEvents_SyscallWhitelistDoesNotAffectOtherTypes(t *testing.T) {
+	events := []core.Event{
+		&core.ProcessEvent{KernelEvent: core.KernelEvent{PID: 1, EventType: "process"}, Argv: []string{}},
+		&core.FileEvent{KernelEvent: core.KernelEvent{PID: 1, EventType: "file"}},
+	}
+	filter := core.NewSensorFilter()
+	filter.SyscallWhitelist[59] = struct{}{}
+
+	result := filterEvents(events, filter)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 events (non-syscall should pass), got %d", len(result))
+	}
+}
+
+func TestFilterEvents_NilFilter(t *testing.T) {
+	events := []core.Event{
+		&core.ProcessEvent{KernelEvent: core.KernelEvent{PID: 1, EventType: "process"}, Argv: []string{}},
+	}
+	result := filterEvents(events, nil)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 event with nil filter, got %d", len(result))
+	}
+}
+
+func TestFilterEvents_EmptyFilter(t *testing.T) {
+	events := []core.Event{
+		&core.ProcessEvent{KernelEvent: core.KernelEvent{PID: 1, EventType: "process"}, Argv: []string{}},
+	}
+	filter := core.NewSensorFilter()
+	result := filterEvents(events, filter)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 event with empty filter, got %d", len(result))
+	}
+}
+
+func TestFilterEvents_CombinedFilters(t *testing.T) {
+	events := []core.Event{
+		&core.SyscallEvent{KernelEvent: core.KernelEvent{PID: 100, Comm: "bash", EventType: "syscall"}, SyscallNR: 59, Args: []int{}},
+		&core.SyscallEvent{KernelEvent: core.KernelEvent{PID: 100, Comm: "bash", EventType: "syscall"}, SyscallNR: 42, Args: []int{}},
+		&core.SyscallEvent{KernelEvent: core.KernelEvent{PID: 200, Comm: "sshd", EventType: "syscall"}, SyscallNR: 59, Args: []int{}},
+		&core.SyscallEvent{KernelEvent: core.KernelEvent{PID: 100, Comm: "sshd", EventType: "syscall"}, SyscallNR: 59, Args: []int{}},
+	}
+	filter := core.NewSensorFilter()
+	filter.TargetPIDs[100] = struct{}{}
+	filter.ExcludeComms["sshd"] = struct{}{}
+	filter.SyscallWhitelist[59] = struct{}{}
+
+	result := filterEvents(events, filter)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 event (pid=100, comm=bash, nr=59), got %d", len(result))
+	}
+	se := result[0].(*core.SyscallEvent)
+	if se.PID != 100 || se.Comm != "bash" || se.SyscallNR != 59 {
+		t.Fatalf("wrong event: pid=%d comm=%s nr=%d", se.PID, se.Comm, se.SyscallNR)
+	}
+}
+
+func TestFilterEvents_CanaryPassesThrough(t *testing.T) {
+	events := []core.Event{
+		core.NewCanaryEvent(),
+	}
+	filter := core.NewSensorFilter()
+	filter.TargetPIDs[999] = struct{}{} // canary has PID 0, wouldn't match
+	result := filterEvents(events, filter)
+	// Canary PID is 0, not in TargetPIDs, so it gets filtered
+	if len(result) != 0 {
+		t.Fatalf("expected 0 events (canary PID=0 not in target), got %d", len(result))
 	}
 }

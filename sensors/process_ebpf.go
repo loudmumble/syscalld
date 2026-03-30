@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/cilium/ebpf/link"
@@ -16,11 +17,12 @@ import (
 
 type ProcessSensorEBPF struct {
 	*BaseSensor
-	objs   bpf.BpfObjects
-	links  []link.Link
-	reader *ringbuf.Reader
-	events chan core.Event
-	done   chan struct{}
+	objs      bpf.BpfObjects
+	links     []link.Link
+	reader    *ringbuf.Reader
+	events    chan core.Event
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func NewProcessSensorEBPF() *ProcessSensorEBPF {
@@ -109,11 +111,20 @@ func (s *ProcessSensorEBPF) readLoop() {
 
 		now := float64(time.Now().UnixNano()) / 1e9
 
-		action := "exec"
-		hookName := "sched_process_exec"
-		if event.Action == 2 {
+		var action, hookName string
+		switch event.Action {
+		case 1:
+			action = "exec"
+			hookName = "sched_process_exec"
+		case 2:
+			action = "fork"
+			hookName = "sched_process_exec"
+		case 3:
 			action = "exit"
 			hookName = "sched_process_exit"
+		default:
+			action = "exec"
+			hookName = "sched_process_exec"
 		}
 
 		evt := &core.ProcessEvent{
@@ -140,11 +151,15 @@ func (s *ProcessSensorEBPF) readLoop() {
 }
 
 func (s *ProcessSensorEBPF) Stop() {
+	s.stateMu.Lock()
 	if !s.started {
+		s.stateMu.Unlock()
 		return
 	}
 	s.started = false
-	close(s.done)
+	s.stateMu.Unlock()
+
+	s.closeOnce.Do(func() { close(s.done) })
 	if s.reader != nil {
 		s.reader.Close()
 	}

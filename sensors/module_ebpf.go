@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/cilium/ebpf/link"
@@ -16,11 +17,12 @@ import (
 
 type ModuleSensorEBPF struct {
 	*BaseSensor
-	objs   bpf.BpfObjects
-	links  []link.Link
-	reader *ringbuf.Reader
-	events chan core.Event
-	done   chan struct{}
+	objs      bpf.BpfObjects
+	links     []link.Link
+	reader    *ringbuf.Reader
+	events    chan core.Event
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func NewModuleSensorEBPF() *ModuleSensorEBPF {
@@ -112,11 +114,15 @@ func (s *ModuleSensorEBPF) readLoop() {
 }
 
 func (s *ModuleSensorEBPF) Stop() {
+	s.stateMu.Lock()
 	if !s.started {
+		s.stateMu.Unlock()
 		return
 	}
 	s.started = false
-	close(s.done)
+	s.stateMu.Unlock()
+
+	s.closeOnce.Do(func() { close(s.done) })
 	if s.reader != nil {
 		s.reader.Close()
 	}

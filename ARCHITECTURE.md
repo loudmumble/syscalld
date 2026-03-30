@@ -2,7 +2,7 @@
 
 ## Overview
 
-ebpf-sensors is a Go library that provides a unified interface for kernel event monitoring via eBPF. It is designed as a dependency for security tools (Sentinel, Agora, Aegis) and also ships a standalone CLI binary (`cmd/syscalld/`) with a Bubbletea TUI.
+syscalld is a Go library that provides a unified interface for kernel event monitoring via eBPF. It is designed as a dependency for security tools (Sentinel, Agora, Aegis) and also ships a standalone CLI binary (`cmd/syscalld/`) with a Bubbletea TUI.
 
 ## Package Dependency Graph
 

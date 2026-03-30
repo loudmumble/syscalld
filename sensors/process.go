@@ -144,9 +144,9 @@ func (s *ProcessSensor) pollFallback() []core.Event {
 			filename := ""
 			var argv []string
 			if info.Cmdline != "" {
-				parts := strings.SplitN(info.Cmdline, " ", 2)
+				parts := strings.Fields(info.Cmdline)
 				filename = parts[0]
-				argv = strings.Split(info.Cmdline, "\x00")
+				argv = parts
 			}
 			evt := &core.ProcessEvent{
 				KernelEvent: core.KernelEvent{
@@ -172,10 +172,12 @@ func (s *ProcessSensor) pollFallback() []core.Event {
 				KernelEvent: core.KernelEvent{
 					Timestamp: now,
 					PID:       pid,
+					UID:       info.UID,
 					Comm:      info.Comm,
 					EventType: "process",
 				},
 				Action: "exit",
+				PPID:   info.PPID,
 				Argv:   []string{},
 			}
 			events = append(events, evt)
@@ -193,7 +195,13 @@ func scanProc() map[int]procInfo {
 		return pids
 	}
 
-	for _, pidDir := range matches {
+	// Cap scanned processes to prevent unbounded memory allocation.
+	limit := 500
+	if len(matches) < limit {
+		limit = len(matches)
+	}
+
+	for _, pidDir := range matches[:limit] {
 		pid, err := strconv.Atoi(filepath.Base(pidDir))
 		if err != nil {
 			continue
@@ -207,12 +215,19 @@ func scanProc() map[int]procInfo {
 			continue
 		}
 		for _, line := range strings.Split(string(statusData), "\n") {
-			if strings.HasPrefix(line, "Name:") {
-				info.Comm = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
-			} else if strings.HasPrefix(line, "PPid:") {
-				info.PPID, _ = strconv.Atoi(strings.TrimSpace(strings.SplitN(line, ":", 2)[1]))
-			} else if strings.HasPrefix(line, "Uid:") {
-				fields := strings.Fields(strings.SplitN(line, ":", 2)[1])
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := parts[0]
+			val := strings.TrimSpace(parts[1])
+			switch key {
+			case "Name":
+				info.Comm = val
+			case "PPid":
+				info.PPID, _ = strconv.Atoi(val)
+			case "Uid":
+				fields := strings.Fields(val)
 				if len(fields) > 0 {
 					info.UID, _ = strconv.Atoi(fields[0])
 				}

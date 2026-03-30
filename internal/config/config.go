@@ -115,19 +115,22 @@ func Load(path string) (*Config, error) {
 
 // Save writes a config to disk, creating parent directories as needed.
 func Save(cfg *Config, path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }
 
 // DefaultPath returns the default config file path.
 func DefaultPath() string {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join("/etc", "syscalld", "config.yaml")
+	}
 	return filepath.Join(home, ".syscalld", "config.yaml")
 }
 

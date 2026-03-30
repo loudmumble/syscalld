@@ -11,16 +11,12 @@ import (
 type SensorFilter struct {
 	// TargetPIDs filters to only trace these PIDs (empty = all).
 	TargetPIDs map[int]struct{}
-	// ExcludePIDs excludes specific PIDs from monitoring.
-	ExcludePIDs map[int]struct{}
 	// TargetPIDNS filters by PID namespace inode number. Nil means no filter.
 	TargetPIDNS *int
 	// TargetCgroup filters by cgroup v2 path. Empty means no filter.
 	TargetCgroup string
 	// SyscallWhitelist only captures these syscall numbers (empty = all).
 	SyscallWhitelist map[int]struct{}
-	// TargetComms limits monitoring to processes with these comm names (empty = all).
-	TargetComms map[string]struct{}
 	// ExcludeComms skips events from these process names.
 	ExcludeComms map[string]struct{}
 }
@@ -29,9 +25,7 @@ type SensorFilter struct {
 func NewSensorFilter() *SensorFilter {
 	return &SensorFilter{
 		TargetPIDs:       make(map[int]struct{}),
-		ExcludePIDs:      make(map[int]struct{}),
 		SyscallWhitelist: make(map[int]struct{}),
-		TargetComms:      make(map[string]struct{}),
 		ExcludeComms:     make(map[string]struct{}),
 	}
 }
@@ -79,9 +73,6 @@ func (f *SensorFilter) ToBPFDefines() string {
 
 // MatchesPID checks if a PID passes the filter (for fallback/runtime filtering).
 func (f *SensorFilter) MatchesPID(pid int) bool {
-	if _, excluded := f.ExcludePIDs[pid]; excluded {
-		return false
-	}
 	if len(f.TargetPIDs) == 0 {
 		return true
 	}
@@ -89,18 +80,13 @@ func (f *SensorFilter) MatchesPID(pid int) bool {
 	return ok
 }
 
-// MatchesComm checks if a comm name passes the filter.
-// If TargetComms is non-empty, only those comms are allowed.
-// ExcludeComms always takes precedence.
+// MatchesComm checks if a comm name passes the filter (not in exclude list).
 func (f *SensorFilter) MatchesComm(comm string) bool {
-	if _, excluded := f.ExcludeComms[comm]; excluded {
-		return false
-	}
-	if len(f.TargetComms) == 0 {
+	if len(f.ExcludeComms) == 0 {
 		return true
 	}
-	_, ok := f.TargetComms[comm]
-	return ok
+	_, excluded := f.ExcludeComms[comm]
+	return !excluded
 }
 
 // MatchesSyscall checks if a syscall number passes the whitelist filter.

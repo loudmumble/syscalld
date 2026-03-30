@@ -142,10 +142,8 @@ func (s *DnsSensor) pollFallback() []core.Event {
 			pid := inodePID[inode]
 
 			comm := ""
-			queryName := ""
 			if pid > 0 {
 				comm = readProcComm(fmt.Sprintf("/proc/%d", pid))
-				queryName = extractQueryFromCmdline(pid)
 			}
 
 			evt := &core.DnsEvent{
@@ -155,38 +153,18 @@ func (s *DnsSensor) pollFallback() []core.Event {
 					Comm:      comm,
 					EventType: "dns",
 				},
-				QueryName: queryName,
-				DestIP:    dstIP,
-				DestPort:  53,
+				DestIP:   dstIP,
+				DestPort: 53,
 			}
 			events = append(events, evt)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[DnsSensor] scanner error reading /proc/net/udp: %v\n", err)
+	}
 
 	s.knownConns = current
 	return events
-}
-
-// extractQueryFromCmdline attempts to extract a DNS query domain from a process's
-// command line. Common DNS tools (dig, nslookup, host, drill, resolvectl) put the
-// query target in their argv. Returns empty string if no domain-like arg is found.
-func extractQueryFromCmdline(pid int) string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil || len(data) == 0 {
-		return ""
-	}
-	args := strings.Split(string(data), "\x00")
-	// Walk args looking for domain-like strings (contains a dot, no path separators)
-	for _, arg := range args[1:] { // skip argv[0]
-		arg = strings.TrimSpace(arg)
-		if arg == "" || strings.HasPrefix(arg, "-") || strings.Contains(arg, "/") {
-			continue
-		}
-		if strings.Contains(arg, ".") && !strings.HasPrefix(arg, ".") {
-			return arg
-		}
-	}
-	return ""
 }
 
 // DecodeDNSName decodes a DNS wire-format name (length-prefixed labels).

@@ -27,14 +27,22 @@ func NewEventBus() *EventBus {
 }
 
 // On registers a callback for a specific event type.
+// Panics if callback is nil.
 func (b *EventBus) On(eventType string, callback EventHandler) {
+	if callback == nil {
+		panic("EventBus.On: nil callback")
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.handlers[eventType] = append(b.handlers[eventType], callback)
 }
 
 // OnAny registers a catch-all callback invoked for every event.
+// Panics if callback is nil.
 func (b *EventBus) OnAny(callback EventHandler) {
+	if callback == nil {
+		panic("EventBus.OnAny: nil callback")
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.anyHandlers = append(b.anyHandlers, callback)

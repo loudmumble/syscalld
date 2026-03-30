@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/cilium/ebpf/link"
@@ -17,11 +18,12 @@ import (
 
 type DnsSensorEBPF struct {
 	*BaseSensor
-	objs   bpf.BpfObjects
-	links  []link.Link
-	reader *ringbuf.Reader
-	events chan core.Event
-	done   chan struct{}
+	objs      bpf.BpfObjects
+	links     []link.Link
+	reader    *ringbuf.Reader
+	events    chan core.Event
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func NewDnsSensorEBPF() *DnsSensorEBPF {
@@ -131,11 +133,15 @@ func (s *DnsSensorEBPF) readLoop() {
 }
 
 func (s *DnsSensorEBPF) Stop() {
+	s.stateMu.Lock()
 	if !s.started {
+		s.stateMu.Unlock()
 		return
 	}
 	s.started = false
-	close(s.done)
+	s.stateMu.Unlock()
+
+	s.closeOnce.Do(func() { close(s.done) })
 	if s.reader != nil {
 		s.reader.Close()
 	}

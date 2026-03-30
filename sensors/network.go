@@ -217,6 +217,9 @@ func (s *NetworkSensor) pollFallback() []core.Event {
 			events = append(events, evt)
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[NetworkSensor] scanner error reading /proc/net/tcp: %v\n", err)
+	}
 	s.knownConns = currentConns
 
 	return events

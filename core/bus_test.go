@@ -265,3 +265,23 @@ func TestEventBusConcurrency(t *testing.T) {
 	}
 	mu.Unlock()
 }
+
+func TestOnNilHandlerPanics(t *testing.T) {
+	bus := NewEventBus()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for nil callback in On()")
+		}
+	}()
+	bus.On("syscall", nil)
+}
+
+func TestOnAnyNilHandlerPanics(t *testing.T) {
+	bus := NewEventBus()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for nil callback in OnAny()")
+		}
+	}()
+	bus.OnAny(nil)
+}

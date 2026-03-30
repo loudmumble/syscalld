@@ -8,6 +8,7 @@ package core
 
 import (
 	"fmt"
+	"time"
 )
 
 // SecuritySyscalls maps x86_64 syscall numbers to their names for
@@ -611,8 +612,11 @@ type CanaryEvent struct {
 // NewCanaryEvent creates a CanaryEvent with healthy=true defaults.
 func NewCanaryEvent() *CanaryEvent {
 	return &CanaryEvent{
-		KernelEvent: KernelEvent{EventType: "canary"},
-		Healthy:     true,
+		KernelEvent: KernelEvent{
+			EventType: "canary",
+			Timestamp: float64(time.Now().UnixNano()) / 1e9,
+		},
+		Healthy: true,
 	}
 }
 

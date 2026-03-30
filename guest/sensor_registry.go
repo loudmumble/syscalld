@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"sync"
 
 	"github.com/loudmumble/syscalld/core"
 	"github.com/loudmumble/syscalld/sensors"
@@ -36,12 +37,101 @@ func AllSensorNames() []string {
 	return names
 }
 
-// GetProcessSensor returns either the eBPF version (if root) or the fallback version.
+// GetProcessSensor returns either the eBPF version (if root and eBPF loads
+// successfully) or the fallback /proc-based version. If eBPF initialization
+// fails at Start() time, it automatically degrades to the fallback sensor.
 func GetProcessSensor() core.Sensor {
 	if os.Getuid() == 0 && os.Getenv("FORCE_FALLBACK") == "" {
-		return sensors.NewProcessSensorEBPF()
+		return &ebpfWithFallback{
+			ebpf:     sensors.NewProcessSensorEBPF(),
+			fallback: sensors.NewProcessSensor(),
+		}
 	}
 	return sensors.NewProcessSensor()
+}
+
+// ebpfWithFallback wraps an eBPF sensor and a fallback sensor. If the eBPF
+// sensor fails to start (Started() returns false after Start()), it
+// transparently delegates all operations to the fallback.
+type ebpfWithFallback struct {
+	ebpf     core.Sensor
+	fallback core.Sensor
+	mu       sync.RWMutex
+	active   core.Sensor
+}
+
+func (s *ebpfWithFallback) Name() string {
+	s.mu.RLock()
+	a := s.active
+	s.mu.RUnlock()
+	if a != nil {
+		return a.Name()
+	}
+	return s.ebpf.Name()
+}
+
+func (s *ebpfWithFallback) Start(filters *core.SensorFilter) {
+	s.ebpf.Start(filters)
+	if s.ebpf.Started() {
+		s.mu.Lock()
+		s.active = s.ebpf
+		s.mu.Unlock()
+	} else {
+		fmt.Fprintf(os.Stderr, "[sensor] eBPF %s failed to load, falling back to /proc\n", s.ebpf.Name())
+		s.fallback.Start(filters)
+		s.mu.Lock()
+		s.active = s.fallback
+		s.mu.Unlock()
+	}
+}
+
+func (s *ebpfWithFallback) Stop() {
+	s.mu.RLock()
+	a := s.active
+	s.mu.RUnlock()
+	if a != nil {
+		a.Stop()
+	}
+}
+
+func (s *ebpfWithFallback) Poll() []core.Event {
+	s.mu.RLock()
+	a := s.active
+	s.mu.RUnlock()
+	if a != nil {
+		return a.Poll()
+	}
+	return nil
+}
+
+func (s *ebpfWithFallback) Mode() string {
+	s.mu.RLock()
+	a := s.active
+	s.mu.RUnlock()
+	if a != nil {
+		return a.Mode()
+	}
+	return "fallback"
+}
+
+func (s *ebpfWithFallback) Started() bool {
+	s.mu.RLock()
+	a := s.active
+	s.mu.RUnlock()
+	if a != nil {
+		return a.Started()
+	}
+	return false
+}
+
+func (s *ebpfWithFallback) Health() core.SensorHealth {
+	s.mu.RLock()
+	a := s.active
+	s.mu.RUnlock()
+	if a != nil {
+		return a.Health()
+	}
+	return core.SensorHealth{Name: s.ebpf.Name()}
 }
 
 // SelectSensors instantiates the sensors identified by name.

@@ -166,100 +166,109 @@ func (s *MemorySensor) pollFallback() []core.Event {
 			continue
 		}
 
-		f, err := os.Open(filepath.Join(pidDir, "maps"))
-		if err != nil {
-			continue
-		}
-
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := scanner.Text()
-			parts := strings.Fields(line)
-			if len(parts) < 5 {
-				continue
-			}
-
-			perms := parts[1]
-			if !strings.Contains(perms, "x") {
-				continue
-			}
-
-			// Classify the mapping:
-			//   device "00:00" + inode "0" + no name → truly anonymous
-			//   name starting with "/memfd:" → memfd-backed fileless execution
-			device := parts[3]
-			inode := parts[4]
-			var mapName string
-			if len(parts) >= 6 {
-				mapName = parts[5]
-			}
-
-			isAnon := device == "00:00" && inode == "0" && mapName == ""
-			isMemFD := strings.HasPrefix(mapName, "/memfd:")
-
-			// Exclude well-known kernel-managed anonymous regions.
-			isKernelAnon := mapName == "[vdso]" || mapName == "[vsyscall]" ||
-				mapName == "[heap]" || mapName == "[stack]" ||
-				strings.HasPrefix(mapName, "[anon:") ||
-				strings.HasPrefix(mapName, "[stack:")
-
-			if (!isAnon && !isMemFD) || isKernelAnon {
-				continue
-			}
-
-			addrRange := strings.SplitN(parts[0], "-", 2)
-			if len(addrRange) != 2 {
-				continue
-			}
-			start, err := strconv.ParseUint(addrRange[0], 16, 64)
-			if err != nil {
-				continue
-			}
-			end, err := strconv.ParseUint(addrRange[1], 16, 64)
-			if err != nil {
-				continue
-			}
-
-			key := fmt.Sprintf("%d:0x%x", pid, start)
-			current[key] = struct{}{}
-
-			if _, known := s.knownRegions[key]; !known {
-				prot := 0
-				if strings.Contains(perms, "r") {
-					prot |= 1 // PROT_READ
-				}
-				if strings.Contains(perms, "w") {
-					prot |= 2 // PROT_WRITE
-				}
-				if strings.Contains(perms, "x") {
-					prot |= 4 // PROT_EXEC
-				}
-
-				operation := "mmap_exec_anon"
-				if isMemFD {
-					operation = "mmap_exec_memfd"
-				}
-
-				comm := readProcComm(pidDir)
-				evt := &core.MemoryEvent{
-					KernelEvent: core.KernelEvent{
-						Timestamp: now,
-						PID:       pid,
-						Comm:      comm,
-						EventType: "memory",
-					},
-					Operation: operation,
-					Addr:      start,
-					Length:    int(end - start),
-					Prot:      prot,
-					MemFDName: mapName,
-				}
-				events = append(events, evt)
-			}
-		}
-		f.Close()
+		s.scanPIDMaps(pidDir, pid, now, current, &events)
 	}
 
 	s.knownRegions = current
 	return events
+}
+
+// scanPIDMaps reads /proc/[pid]/maps for a single process, extracting
+// executable anonymous and memfd-backed regions into the current map
+// and appending new events. File handle is closed via defer.
+func (s *MemorySensor) scanPIDMaps(pidDir string, pid int, now float64, current map[string]struct{}, events *[]core.Event) {
+	f, err := os.Open(filepath.Join(pidDir, "maps"))
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.Fields(line)
+		if len(parts) < 5 {
+			continue
+		}
+
+		perms := parts[1]
+		if !strings.Contains(perms, "x") {
+			continue
+		}
+
+		device := parts[3]
+		inode := parts[4]
+		var mapName string
+		if len(parts) >= 6 {
+			mapName = parts[5]
+		}
+
+		isAnon := device == "00:00" && inode == "0" && mapName == ""
+		isMemFD := strings.HasPrefix(mapName, "/memfd:")
+
+		isKernelAnon := mapName == "[vdso]" || mapName == "[vsyscall]" ||
+			mapName == "[heap]" || mapName == "[stack]" ||
+			strings.HasPrefix(mapName, "[anon:") ||
+			strings.HasPrefix(mapName, "[stack:")
+
+		if (!isAnon && !isMemFD) || isKernelAnon {
+			continue
+		}
+
+		addrRange := strings.SplitN(parts[0], "-", 2)
+		if len(addrRange) != 2 {
+			continue
+		}
+		start, err := strconv.ParseUint(addrRange[0], 16, 64)
+		if err != nil {
+			continue
+		}
+		end, err := strconv.ParseUint(addrRange[1], 16, 64)
+		if err != nil {
+			continue
+		}
+		if end <= start {
+			continue
+		}
+
+		key := fmt.Sprintf("%d:0x%x", pid, start)
+		current[key] = struct{}{}
+
+		if _, known := s.knownRegions[key]; !known {
+			prot := 0
+			if strings.Contains(perms, "r") {
+				prot |= 1 // PROT_READ
+			}
+			if strings.Contains(perms, "w") {
+				prot |= 2 // PROT_WRITE
+			}
+			if strings.Contains(perms, "x") {
+				prot |= 4 // PROT_EXEC
+			}
+
+			operation := "mmap_exec_anon"
+			if isMemFD {
+				operation = "mmap_exec_memfd"
+			}
+
+			comm := readProcComm(pidDir)
+			evt := &core.MemoryEvent{
+				KernelEvent: core.KernelEvent{
+					Timestamp: now,
+					PID:       pid,
+					Comm:      comm,
+					EventType: "memory",
+				},
+				Operation: operation,
+				Addr:      start,
+				Length:    int(end - start),
+				Prot:      prot,
+				MemFDName: mapName,
+			}
+			*events = append(*events, evt)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[MemorySensor] scanner error reading %s/maps: %v\n", pidDir, err)
+	}
 }

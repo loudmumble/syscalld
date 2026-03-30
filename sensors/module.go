@@ -117,5 +117,8 @@ func readModules() map[string]struct{} {
 			modules[parts[0]] = struct{}{}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[ModuleSensor] scanner error reading /proc/modules: %v\n", err)
+	}
 	return modules
 }

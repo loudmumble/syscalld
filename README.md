@@ -87,7 +87,7 @@ make lint        # Run staticcheck + vet
 make check       # All of the above
 ```
 
-215 tests across 3 packages covering all event types, sensor lifecycle, BPF program validation, fallback polling, event serialization, and guest agent orchestration.
+326 tests across 4 packages (core, sensors, guest, alerts) covering all event types, sensor lifecycle, BPF program validation, fallback polling, runtime filter application, event serialization, alert engine, and guest agent orchestration.
 
 ## Requirements
 
@@ -115,12 +115,13 @@ bpf/            Generated eBPF bindings (not active)
 
 ## Used By
 
-- **[Aegis](https://github.com/loudmumble/aegis)** — Behavioral IDS for agentic AI attacks
-- **[Sentinel](https://github.com/loudmumble/sentinel)** — eBPF-based security monitoring toolkit
+- **Aegis** -- Behavioral IDS for agentic AI attacks
+- **Sentinel** -- eBPF-based security monitoring toolkit
+- **Agora** -- AI-powered malware analysis sandbox
 
 ## License
 
-AGPL-3.0 — see [LICENSE](LICENSE).
+MIT
 
 ## CLI Binary (`cmd/syscalld/`)
 
@@ -162,11 +163,10 @@ fallback: true   # Always active — eBPF mode is not implemented in the Go libr
 output:
   format: text   # text | json | ndjson
   file: ""       # empty = stdout
-  webhook_url: ""  # POST alerts to this URL when thresholds are exceeded
 filters:
   target_pids: []
-  exclude_pids: []
-  target_comms: []
+  exclude_pids: []       # Removes PIDs from target_pids (SensorFilter has no ExcludePIDs field)
+  target_comms: []       # Parsed but not applied (SensorFilter has no TargetComms field)
   exclude_comms: []
   min_severity: 0
 ```
@@ -180,3 +180,10 @@ filters:
 | `performance-baseline` | memory, filesystem, network | text | Performance analysis |
 | `minimal` | process | text | Low-overhead tracing |
 
+## Sprint History
+
+| Sprint | Changes |
+|--------|---------|
+| 1 | Core library: 7 sensors, EventBus, SensorManager, SensorFilter, guest VM runner |
+| 2 | CLI binary (`cmd/syscalld/`), YAML config system with presets, bubbletea live event TUI |
+| 3 | Config init/show/presets management, fallback mode forcing, NDJSON streaming output |
